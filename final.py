@@ -77,7 +77,7 @@ from sklearn.model_selection import KFold, TimeSeriesSplit, GridSearchCV
 from scikeras.wrappers import KerasRegressor
 
 # ORGANIZACIÓN DE LOS DATOS
-datos = pd.read_csv('c:\\Users\\VALERIA\\Documents\\DANA\\Universidad\\UNAL\\VIII SEMESTRE\\Series\\Series-2\\Series-2\\AAPL.csv', delimiter=',', header = 0, usecols =[2,4],
+datos = pd.read_csv('c:\\Users\\Series\\Series-2\\Series-2\\AAPL.csv', delimiter=',', header = 0, usecols =[2,4],
                     names =["Fecha", "Cierre"], dtype={"Cierre": np.float64})
 
 datos['Fecha'] = pd.to_datetime(datos['Fecha'])
