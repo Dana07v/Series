@@ -1,0 +1,505 @@
+---
+title: "Series-apple"
+output: html_document
+date: "2024-03-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(readr)
+library(ggplot2)
+library(reticulate)
+library(dplyr)
+library(xts)
+library(readxl)
+library(TSstudio)
+library(zoo)
+library(forecast)
+library(MASS)
+library(VGAM)
+library(car)
+library(astsa)
+library(tidyverse)
+library(lubridate)
+library(timetk)
+library(nonlinearTseries)
+library(feasts)
+library(fable)
+library(fabletools)
+library(tibble)
+library(tsibble)
+```
+
+## Acciones de APPLE
+Cierre de las acciones de APPLE desde el 2015-05-27 al 2020-05-10 medidas diariamente. 
+
+```{r cars}
+AAPL <- read_csv("AAPL.csv")
+apple2 <- xts(x = AAPL[,"close"],
+                  order.by = AAPL$date)
+
+TSstudio::ts_plot(apple2,title="",slider=TRUE)
+```
+ Del grafico podemos observar que se tiene tendencia que podría ser lineal además de que su varianza va aumentando a traves del tiempo, no parece tener estacionalidad.
+
+```{r}
+# REGULARIDAD DE LA SERIE
+is.regular(apple2,strict = TRUE)
+is.regular(apple2,strict = FALSE)
+```
+Decimos entonces que la serie no es estrictamente regular puesto que no obtiene valores los fines de semana.
+
+## Estabilización de la varianza
+
+```{r}
+MASS::boxcox(lm(apple2 ~ 1),seq(-2, 3, length = 50))  
+forecast::BoxCox.lambda(apple2, method ="loglik", lower = -1, upper = 3)
+```
+
+El valor de $\lambda = -0.35$ en este caso, usaremos a box-cox con $\lambda^{-1}(\mu_t^\lambda -1)$. 
+
+```{r}
+plot(BoxCox(apple2,lambda = -0.35))
+lambda <- -0.35
+B_apple<- lambda^{-1}*((apple2^lambda)-1)
+plot(B_apple)
+
+# Objeto ts con estabilización de la varianza
+B_apple_ts <- as.ts(coredata(B_apple))
+```
+
+Se ve un cambio en la pequeño en la varianza, tras la transformación.
+
+## Estimación y eliminación de tendencia
+
+Tomando los datos con la varianza estabilizada, ajustamos una regresión lineal a la serie de tiempo.
+
+```{r}
+#Serie de tiempo en objeto ts
+B_apple_ts <- as.ts(coredata(B_apple))
+
+summary(fit_apple <- lm(B_apple_ts~time(B_apple_ts), na.action=NULL))
+plot(B_apple_ts, ylab="Número de Pasajeros en escala logarítmica") 
+abline(fit_apple,col = "red") # Se añade la recta ajusta
+```
+
+Se concluye que la acción tiene una tendincia lineal creciente. 
+
+Por otro lado con por medio de un enfoque no parametrico, por medio de un enfoque de STL podemos notar una tendencia no lineal.  
+```{r}
+indice_bapple <- as.Date(tk_index(B_apple))
+df_bapple <- data.frame(Fecha=indice_bapple, as.matrix(B_apple))
+tibble_lapple <- tibble(df_bapple)
+
+duplicates(tibble_lapple, key = NULL, index=Fecha)   
+
+###Ajuste STL moviendo los parámetros
+tibble_lapple%>%mutate(Lapple_ajus=smooth_vec(close,span = 0.75, degree = 2))
+
+tibble_lapple%>%mutate(Lapple_ajus=smooth_vec(close,span = 0.75, degree = 2))%>%
+  ggplot(aes(Fecha, close)) +
+  geom_line() +
+  geom_line(aes(y = Lapple_ajus), color = "red")
+```
+
+Por otro lado la descomposición por medio de STL, tenemos:
+
+```{r}
+tsibble_lapple1<-as_tsibble(B_apple_ts)
+str(tsibble_lapple1)
+
+tsibble_lapple1 %>%
+  model(
+    STL(value ~ trend() +
+          season(window = "periodic"),
+        robust = TRUE)) %>%
+  components() %>%
+  autoplot()
+```
+
+Para eliminar la tendencia vamos a utilizar diferencia ordinaria:
+```{r}
+###Diferenciando basado en el objeto tibble
+tibble_lapple%>%mutate(diff_Lapple=close-lag(close))%>%plot_time_series(Fecha,diff_Lapple)
+tibble_lapple<-tibble_lapple%>%mutate(diff_Lapple=close-lag(close))
+
+## con ts
+dlapple<-diff(B_apple_ts)
+```
+
+## Relaciones no lineales
+
+En un inicio buscaremos relaciones de la variable respecto al tiempo por sus retargos:
+```{r}
+par(mar = c(3,2,3,2))
+astsa::lag1.plot(
+  dlapple,15,corr=T)
+```
+
+Con 16 retargos no hay relaciones significativas observadas en el tiempo. 
+
+```{r}
+acf(dlapple, 48, main="Serie diferenciada y con BoxCox de Apple",na.action = na.pass)
+pacf(dlapple, 48, na.action = na.pass)
+```
+
+En cuanto a el AMI, tenemos que las variables no explican mucho una de la otra dado el tiempo.
+```{r}
+nonlinearTseries::mutualInformation(dlapple,lag.max = 100,n.partitions = 50,units = "Bits",do.plot = TRUE) #c("Nats", "Bits", "Bans")
+```
+
+## Deteccion de estacionalidad
+Realizamos un acercamiento a la detección de la estacionalidad. 
+
+El grafico muestra el comportamiento medio de las acciones diariamente en los años.
+
+```{r}
+tibble_lapple %>%na.omit()|>
+  mutate(
+    DIA = str_c("", as.character(lubridate::day(Fecha)))
+  ) %>%
+  plot_time_series(
+    .date_var = Fecha,
+    .value = diff_Lapple,
+    .facet_vars = DIA,
+    .facet_ncol = 4, 
+    .color_var = DIA, 
+    .facet_scales = "fixed",
+    .interactive = FALSE,
+    .legend_show = FALSE,
+    .smooth = FALSE
+  )
+```
+
+Donde se observa que dados los diferentes días el comportamiento medio no varia mucho uno del otro.
+
+Se realiza un Boxplot buscando posible estacionalidad dado el dia de la semana, la semana y el mes.
+
+```{r}
+## Al hacerla por dias de la semana no hay muchas diferencias de medias
+tibble_lapple%>%na.omit()%>%
+  plot_seasonal_diagnostics(.date_var = Fecha,.value = diff_Lapple,.feature_set = c("wday.lbl"),.geom="boxplot")
+
+## Al hacerla por semana no hay diferencias de medias pero no son muy marcadas
+tibble_lapple%>%na.omit()%>%
+  plot_seasonal_diagnostics(.date_var = Fecha,.value = diff_Lapple,.feature_set = c("week"),.geom="boxplot")
+
+## Al hacerla por mes no hay muchas diferencias de medias
+tibble_lapple%>%na.omit()%>%
+  plot_seasonal_diagnostics(.date_var = Fecha,.value = diff_Lapple,.feature_set = c("month.lbl"),.geom="boxplot")
+```
+
+De los anteriores graficos se observa que no hay una diferencia significativa de de medias en ninguno de los tres casos mencionados.
+
+Por ultimo al realizar graficos de densidad por kernell llegamos a una conclusión similar dado el día.
+
+```{r}
+## Por kernell las densidades diarias no varian mucho más de las otras
+ggplot(tibble_lapple %>%na.omit()|>
+         mutate(
+           DIA = str_c("", as.character(lubridate::day(Fecha)))
+         ), aes(x = diff_Lapple)) +
+  geom_density(aes(fill = DIA)) +
+  ggtitle("LosPass - Estimación de la densidad vía Kernel por mes") +
+  facet_grid(rows = vars(as.factor(DIA)))
+```
+
+## Suavizamiento Exponencial
+
+Con lo anterior, se va a trabajar con el objeto de serie de tiempo tras la transformación de Box-Cox.
+
+Los graficos presentan la modelación de la tendencia con paramentros $\alpha$, el nivel, y un pronostico de 24 observaciones. No se hace uso de $\gamma$ puesto que no se identifico una componente de estacionalidad en la serie presentada. (SEASONAL es el default)
+
+```{r}
+HWAP_inic=stats::HoltWinters(B_apple_ts,alpha=NULL,beta=FALSE,gamma=FALSE)
+plot(HWAP_inic)
+plot(forecast::forecast(HWAP_inic,h=24,level =0.95))
+```
+
+De lo anterior podemos evidenciar que el modelo tiene un buen ajuste frente a los datos presentados, en cuanto a su pronostico parece no continua con la tendencia además sus intervalos parecen ser un poco grandes. 
+
+```{r}
+HWAP=stats::HoltWinters(B_apple_ts,gamma=FALSE,seasonal="additive")
+plot(HWAP)
+plot(forecast::forecast(HWAP,h=24,level =0.95))
+```
+
+Con el modelo anterior tenemos el parametro de $\alpha$ y $\beta$, la pendiente, utilizando un modelo de tipo aditivo, donde notamos un buen ajuste frente a los datos presentados, frente al pronostico podemos ver que se mantiene la tendencia y que los intervalos de confianza no varian de forma significativa frente al modelo anterior. 
+
+```{r}
+ajustados=fitted(HWAP)
+plot(ajustados)
+HWAP
+```
+
+
+Haciendo uso de un tsibble
+
+```{r}
+ajustepass=tsibble_lapple1%>%
+  model(ETS(value~ error("A")+trend("A")+season("N")))
+
+pronostico=ajustepass%>%
+  fabletools::forecast(h=12)
+pronostico
+
+pronostico%>%autoplot(tsibble_lapple1)+geom_line(aes(y=.fitted),col="#D55E00",data=augment(ajustepass))+labs(y=" ",title="Pronóstico u ajustados")+guides(colour="none")
+```
+POR ULTIMO
+
+```{r}
+modelos<-tsibble_lapple1%>%
+   model(ets=ETS(value~ error("A")+trend("A")+season("N")),
+         stl=decomposition_model(STL(value ~ trend(window = 13) +
+                   season(window = "periodic"),
+    robust = TRUE),NAIVE(season_adjust)))
+ modelos 
+
+ modelos%>%fabletools::forecast(h=12)%>%
+   autoplot(tsibble_lapple1)
+```
+
+
+## Arboles de desición
+
+Se hace uso de la serie sin tndencia.
+
+```{r, include=FALSE}
+write.csv(tibble_lapple, "tibble_lapple.txt")
+write.csv(dlapple, "dlapple.txt")
+```
+
+```{python, include=FALSE}
+import pandas as pd
+import numpy as np
+from matplotlib import pyplot
+import scipy as sp
+import sklearn
+import os
+import matplotlib.pylab as plt
+from matplotlib.pylab import rcParams
+from statsmodels.graphics.tsaplots import plot_acf
+from statsmodels.tsa.stattools import acf
+from statsmodels.graphics.tsaplots import plot_pacf
+from statsmodels.tsa.stattools import pacf
+rcParams['figure.figsize'] = 15, 6
+from pandas.plotting import register_matplotlib_converters
+```
+
+```{python}
+data = pd.read_csv('tibble_lapple.txt', skiprows=1, delimiter=',', header = 0, usecols =[1,3],
+                   names =["Fecha", "diff lapple"], dtype={"diff lapple": np.float64})
+dlapple=data.set_index("Fecha")
+t_dlapple_v = pd.DataFrame(data['diff lapple'].values,index=data['Fecha'])
+t_dlapple=dlapple['diff lapple']
+plt.plot(t_dlapple)
+plt.title('Cierre acciones de apple sin tendencia') 
+```
+
+Tenemos la función de autocorrelación y aoutocorrelación parcial
+
+```{python}
+from statsmodels.graphics.tsaplots import plot_acf
+plot_acf(t_dlapple,lags=100)
+pyplot.show()
+
+from statsmodels.graphics.tsaplots import plot_pacf
+plot_pacf(t_dlapple,lags=100,method='ywm',alpha=0.01)
+pyplot.show()
+```
+
+Además de esto, utilizaremos el periodograma para determinar las covariables que se van a utilizar
+
+```{python}
+f, Pxx_den=sp.signal.periodogram(t_dlapple.values)
+plt.plot(f, Pxx_den)
+max_index_value = np.argmax(Pxx_den, axis=0)
+print(max_index_value)
+frecuencia_max=f[max_index_value]
+print(frecuencia_max)
+1/frecuencia_max
+```
+
+```{python}
+#print(heapq.nlargest(10, range(len(Pxx_den)), key=Pxx_den.__getitem__))
+
+#print(1/f[4])
+#print(1/f[5])
+#print(1/f[9])
+#print(1/f[7])
+#print(1/f[15])
+#print(1/f[11])
+```
+
+```{python}
+f_welch, Pxx_den_welch=sp.signal.welch(t_dlapple.values)
+plt.plot(f_welch, Pxx_den_welch)
+
+max_index_value_welch = np.argmax(Pxx_den_welch, axis=0)
+print(max_index_value_welch)
+frecuencia_max_welch=f_welch[max_index_value_welch]
+print(frecuencia_max_welch)
+1/frecuencia_max_welch
+```
+
+```{python}
+import heapq
+print(heapq.nlargest(10, range(len(Pxx_den_welch)), key=Pxx_den_welch.__getitem__))
+print(1/f_welch[1])
+print(1/f_welch[2])
+print(1/f_welch[3])
+```
+
+Dado lo anterior, utilizaremos como covariables de los primeros 12 retardos cada dos y los retardos del 120 al 90
+
+```{python}
+var_rez = pd.DataFrame()
+
+for i in range(12,0,-2):
+    var_rez[['t-'+str(i)]] = t_dlapple_v.shift(i)
+
+for i in range(190,120,-1):
+    var_rez[['t-'+str(i)]] = t_dlapple_v.shift(i)
+
+#for i in range(560,530,-2):
+ #   var_rez[['t-'+str(i)]] = t_dlapple_v.shift(i)
+ 
+var_rez['t'] = t_dlapple_v.values
+var_rezl = var_rez[190:]
+print(var_rezl)
+```
+
+Se realiza la división de datos para entrenamiento, validación y prueba para la "respuesta" y para sus covariables
+
+```{python}
+dlapple_split = var_rezl.values
+X1= dlapple_split[:, 0:-1]  
+y1 =dlapple_split[:,-1]  
+
+Y1 = y1
+print('Complete Observations for Target after Supervised configuration: %d' %len(Y1))
+traintarget_size = int(len(Y1) * 0.70) 
+valtarget_size = int(len(Y1) * 0.10)# Set split
+testtarget_size = int(len(Y1) * 0.20)# Set split
+print(traintarget_size,valtarget_size,testtarget_size)
+print('Train + Validation + Test: %d' %(traintarget_size+valtarget_size+testtarget_size))
+```
+
+```{python}
+Y1 = y1
+traintarget_size = int(len(Y1) * 0.70) 
+valtarget_size = int(len(Y1) * 0.10)+1# Set split
+testtarget_size = int(len(Y1) * 0.20)+1# Set split
+train_target, val_target,test_target = Y1[0:traintarget_size],Y1[(traintarget_size):(traintarget_size+valtarget_size)] ,Y1[(traintarget_size+valtarget_size):len(Y1)]
+
+print('Observations for Target: %d' % (len(Y1)))
+print('Training Observations for Target: %d' % (len(train_target)))
+print('Validation Observations for Target: %d' % (len(val_target)))
+print('Test Observations for Target: %d' % (len(test_target)))
+```
+
+```{python}
+trainfeature_size = int(len(X1) * 0.70)
+valfeature_size = int(len(X1) * 0.10)+1# Set split
+testfeature_size = int(len(X1) * 0.20)# Set split
+train_feature, val_feature,test_feature = X1[0:traintarget_size],X1[(traintarget_size):(traintarget_size+valtarget_size)] ,X1[(traintarget_size+valtarget_size):len(Y1)]
+
+print('Observations for Feature: %d' % (len(X1)))
+print('Training Observations for Feature: %d' % (len(train_feature)))
+print('Validation Observations for Feature: %d' % (len(val_feature)))
+print('Test Observations for Feature: %d' % (len(test_feature)))
+```
+
+Se aplica un arbol de regresión sin profundidad maxima estipulada
+
+```{python}
+from sklearn.tree import DecisionTreeRegressor
+
+decision_tree_PM25 = DecisionTreeRegressor()  # max-depth not set
+decision_tree_PM25.fit(train_feature, train_target)
+
+print("Coeficiente R2 sobre el conjunto de entrenamiento:",decision_tree_PM25.score(train_feature, train_target))
+print("Coeficiente R2 sobre el conjunto de Validación:",decision_tree_PM25.score(val_feature,val_target))  # predictions are horrible if negative value, no relationship if 0
+print("el RECM sobre validación es:",(((decision_tree_PM25.predict(val_feature)-val_target)**2).mean()) )
+```
+
+Note que si bien se tiene un ajuste perfecto en entrenamiento, en validación el $R^2$ tiene un valor negativo, lo que implica un sobreajuste sobre los datos de entrenamiento.
+
+```{python}
+for d in [2, 3, 4, 5,6,8,9,10,11,12]:
+    decision_tree_PM25 = DecisionTreeRegressor(max_depth=d)
+    decision_tree_PM25.fit(train_feature, train_target)
+
+    print('max_depth=', str(d))
+    print("Coeficiente R2 sobre el conjunto de entrenamiento:",decision_tree_PM25.score(train_feature, train_target))
+    print("Coeficiente R2 sobre el conjunto de validación:",decision_tree_PM25.score(val_feature, val_target), '\n')  # You want the test score to be positive and high
+    print("el RECM sobre el conjunto de validación es:",sklearn.metrics.mean_squared_error(decision_tree_PM25.predict(val_feature),val_target, squared=False))
+
+```
+
+Se usa una grilla de valores para evaluar un posible hiperparametro para la profundidad, en este caso esta será de 2 usando el coeficiente de $R^2$. Ya definido esto, se reentrena el modelo con los datos de entrenamiento y validación.
+
+```{python}
+train_val_feature=np.concatenate((train_feature,val_feature),axis=0)
+train_val_target=np.concatenate((train_target,val_target),axis=0)
+```
+
+```{python}
+from matplotlib import pyplot as plt
+
+decision_tree_PM25 = DecisionTreeRegressor(max_depth=2)  # fill in best max depth here
+decision_tree_PM25.fit(train_val_feature, train_val_target)
+
+train_val_prediction = decision_tree_PM25.predict(train_val_feature)
+test_prediction = decision_tree_PM25.predict(test_feature)
+
+plt.scatter(train_val_prediction, train_val_target, label='train')  # blue
+plt.scatter(test_prediction, test_target, label='test')  # orange
+plt.show()
+print("Raíz de la Pérdida cuadrática Entrenamiento:",sklearn.metrics.mean_squared_error( train_val_prediction, train_val_target,squared=False))
+
+print("Raíz de la Pérdida cuadrática Prueba:",sklearn.metrics.mean_squared_error(test_prediction, test_target,squared=False))
+
+```
+
+De lo anterior podemos concluir que lo modelado tiente a tomar en entrenamiento datos en la media comparado con su valor real. 
+
+A continuación se presenta un gráfico de las predicciones del entrenamiento y de prueba, donde ambas tienden a la media.
+
+```{python}
+from matplotlib import pyplot as plt
+
+decision_tree_PM25_prun_mincost = DecisionTreeRegressor(max_depth=2)  # fill in best max depth here
+decision_tree_PM25_prun_mincost.fit(train_val_feature, train_val_target)
+
+train_val_prediction_prun_mincost = decision_tree_PM25.predict(train_val_feature)
+test_prediction_prun_mincost = decision_tree_PM25.predict(test_feature)
+
+plt.scatter(train_val_prediction_prun_mincost, train_val_target, label='train')  # blue
+plt.scatter(test_prediction_prun_mincost, test_target, label='test')  # orange
+plt.show()
+```
+
+```{python}
+indicetrian_val_test=var_rezl.index
+print(indicetrian_val_test.size)  ###Tamaño del índice
+indicetrain_val=indicetrian_val_test[0:214]
+indicetest=indicetrian_val_test[214:853]
+
+targetjoint=np.concatenate((train_val_target,test_target))
+
+predictionjoint=np.concatenate((train_val_prediction,test_prediction))
+
+d = {'observado': targetjoint, 'Predicción': predictionjoint}
+ObsvsPred=pd.DataFrame(data=d,index=indicetrian_val_test)
+```
+
+En la siguiente gráfica se muestra el valor real frete a su predicción.
+
+```{python}
+plt.plot(ObsvsPred)
+```
+
